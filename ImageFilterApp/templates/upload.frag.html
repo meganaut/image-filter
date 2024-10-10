@@ -1,0 +1,14 @@
+<div>
+    <button hx-post="/filter" hx-trigger="click" hx-target="#uploadedImage" hx-vals="{
+                                        'filter': 'document.getElementById('scripto').value'
+                                        'imageData': 'document.getElementById('uploadedImage').src'
+                                    }">
+        Apply Filter
+    </button>
+    <img id="uploadedImage" src="data:image/png;base64,${image}" alt="Filtered Image" />
+</div>
+
+<div>
+    <label for="scripto">Image Filter:</label>
+    <input type="text-area" id="scripto" name="scripto" />
+</div>

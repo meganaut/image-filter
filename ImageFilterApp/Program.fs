@@ -2,14 +2,11 @@
 open System.Net
 open SixLabors.ImageSharp
 open SixLabors.ImageSharp.PixelFormats
-open SixLabors.ImageSharp.Processing
-open SixLabors.ImageSharp.Formats
 open System.Text
 open System
 open System.Text.Json
 open HttpMultipartParser
 
-// Models
 type Pixel = { R: byte; G: byte; B: byte; A: byte }
 
 type ImageData =
@@ -17,7 +14,6 @@ type ImageData =
       Height: int
       Pixels: Pixel[,] }
 
-// Load Image Function
 let loadImage (file: Stream) =
     try
         use image = Image.Load<Rgba32>(file)
@@ -40,8 +36,21 @@ let loadImage (file: Stream) =
     with ex ->
         Error(sprintf "Failed to load image: %s" ex.Message)
 
-// Apply Filter Function
 let applyFilter (filterFn: int -> int -> Pixel -> Pixel) (data: Pixel[,]) = data |> Array2D.mapi filterFn
+
+let prepend preText bodyText = preText + bodyText
+
+let render template (chunks: (string * string) list) =
+    let rec renderChunks (chunks: (string * string) list) template : string =
+        match chunks with
+        | [] -> template
+        | chunk :: rest ->
+            let (key, str) = chunk
+            let updatedTemplate = template.Replace("${" + key + "}", str)
+            renderChunks rest updatedTemplate
+
+    template |> prepend "./templates/" |> File.ReadAllText |> renderChunks chunks
+
 
 let pngify height width pixels =
     use newImage = new Image<Rgba32>(width, height, Rgba32(0uy, 0uy, 0uy, 0uy))
@@ -55,166 +64,121 @@ let pngify height width pixels =
 
 type FilterRequest = { filter: string; imageData: string }
 
-let parseMultipartFormData (request: HttpListenerRequest) =
-    if request.ContentType.StartsWith("multipart/form-data") then
-        let parser = request.InputStream |> MultipartFormDataParser.Parse
+let parseMultipartFormData inputStream =
+    let parser = inputStream |> MultipartFormDataParser.Parse
 
-        try
-            Some(parser.Files[0].Data)
-        with ex ->
-            Console.WriteLine("Failed to parse multipart form data: %s", ex.Message)
-            None
-    else
+    try
+        Some(parser.Files[0].Data)
+    with ex ->
+        Console.WriteLine("Failed to parse multipart form data: %s", ex.Message)
         None
 
-// Web Application
-let processRequest (context: HttpListenerContext) =
-
+let respondWith (handlerFunc: Stream -> Async<Result<string, string>>) (context: HttpListenerContext) =
     async {
         let request = context.Request
         let response = context.Response
+        Console.WriteLine("{0} {1} -- Begin", request.HttpMethod, request.Url.LocalPath)
 
+        try
+            let stream = request.InputStream
+            let! responseResult = handlerFunc stream
 
-        Console.WriteLine("{0} {1}", request.HttpMethod, request.Url.LocalPath)
-
-        match request.HttpMethod, request.Url.LocalPath with
-        | "POST", "/filter" ->
-            Console.WriteLine("Processing image filter request...")
-
-            if request.HasEntityBody then
-                let! filterRequest =
-                    request.InputStream
-                    |> JsonSerializer.DeserializeAsync<FilterRequest>
-                    |> fun vt -> vt.AsTask()
-                    |> Async.AwaitTask
-
-                let greenfilter x y pixel = { pixel with G = byte 255 }
-
-                let imageResult =
-                    filterRequest.imageData
-                    |> Convert.FromBase64String
-                    |> fun data -> new MemoryStream(data)
-                    |> loadImage
-
-                match imageResult with
-                | Ok image ->
-                    let htmlResponse =
-                        image.Pixels
-                        |> applyFilter greenfilter
-                        |> pngify image.Height image.Width
-                        |> Convert.ToBase64String
-                        |> sprintf
-                            """
-                            <img id="uploadedImage"  src="data:image/png;base64,%s" alt="Filtered Image" />
-                            """
-
-                    let buffer = Encoding.UTF8.GetBytes(htmlResponse)
-                    response.ContentType <- "text/html"
-                    response.StatusCode <- 200
-                    response.ContentLength64 <- int64 buffer.Length
-                    response.OutputStream.Write(buffer, 0, buffer.Length)
-                | Error error ->
-                    response.StatusCode <- 500
-                    let buffer = Encoding.UTF8.GetBytes(error)
-                    response.ContentLength64 <- int64 buffer.Length
-                    response.OutputStream.Write(buffer, 0, buffer.Length)
-            else
-                response.StatusCode <- 400
-                let buffer = Encoding.UTF8.GetBytes("no image to process.")
+            match responseResult with
+            | Ok responseText ->
+                let buffer = Encoding.UTF8.GetBytes(responseText)
+                response.ContentType <- "text/html"
+                response.StatusCode <- 200
                 response.ContentLength64 <- int64 buffer.Length
                 response.OutputStream.Write(buffer, 0, buffer.Length)
-
-
-        | "POST", "/upload" ->
-            Console.WriteLine("Processing image upload request...")
-
-            let redfilter x y pixel = { pixel with R = byte 255 }
-
-            match parseMultipartFormData request with
-            | Some stream ->
-                let imageResult = stream |> loadImage
-
-                match imageResult with
-                | Ok image ->
-                    let htmlResponse =
-                        image.Pixels
-                        |> applyFilter redfilter
-                        |> pngify image.Height image.Width
-                        |> Convert.ToBase64String
-                        |> sprintf
-                            """                                                                                      
-                            <img id="uploadedImage"  src="data:image/png;base64,%s" alt="Filtered Image" />
-                            
-                            <div>
-                                <label for="scripto">Image Filter:</label>
-                                <input type="text-area" id="scripto" name="scripto" />
-                            </div>
-                            
-                            <button 
-                                hx-post="/filter"
-                                hx-trigger="click"
-                                hx-target="#uploadedImage"
-                                hx-vals="{
-                                    'filter': 'document.getElementById('scripto').value'
-                                    'imageData': 'document.getElementById('uploadedImage').src'
-                                }">
-                                Apply Filter
-                            </button>
-                            """
-
-                    let buffer = Encoding.UTF8.GetBytes(htmlResponse)
-                    response.ContentType <- "text/html"
-                    response.StatusCode <- 200
-                    response.ContentLength64 <- int64 buffer.Length
-                    response.OutputStream.Write(buffer, 0, buffer.Length)
-                | Error error ->
-                    response.StatusCode <- 500
-                    let buffer = Encoding.UTF8.GetBytes(error)
-                    response.ContentLength64 <- int64 buffer.Length
-                    response.OutputStream.Write(buffer, 0, buffer.Length)
-
-            | None ->
+            | Error error ->
+                Console.WriteLine("Error: %s", error)
                 response.StatusCode <- 400
-                let buffer = Encoding.UTF8.GetBytes("No file uploaded.")
+                let buffer = error |> prepend "U dun goofed: " |> Encoding.UTF8.GetBytes
                 response.ContentLength64 <- int64 buffer.Length
                 response.OutputStream.Write(buffer, 0, buffer.Length)
-        | "GET", "/" ->
-            // Serve the HTML form for uploading an image
-            let htmlResponse =
-                """
-                <html lang="en">
-                    <head>
-                        <script src="https://unpkg.com/htmx.org"></script>
-                    </head>
-                    <body>
-                        <form 
-                            id="uploadForm"
-                            method="post" 
-                            enctype="multipart/form-data"
-                            hx-post="/upload"
-                            hx-swap="outerHTML"
-                        >
-                            <h1>Upload an Image</h1>
-                            <input type="file" name="file" />
-                            <input type="submit" value="Upload" />
-                        </form>
-                    </body>
-                </html>
-                """
+        with ex ->
+            Console.WriteLine("Error: %s", ex.Message)
+            response.StatusCode <- 500
+            let buffer = Encoding.UTF8.GetBytes("Internal Server Error")
+            response.ContentLength64 <- int64 buffer.Length
+            response.OutputStream.Write(buffer, 0, buffer.Length)
 
-            let buffer = Encoding.UTF8.GetBytes(htmlResponse)
-            response.ContentType <- "text/html"
-            response.StatusCode <- 200
-            response.ContentLength64 <- int64 buffer.Length
-            response.OutputStream.Write(buffer, 0, buffer.Length)
-        | _ ->
-            response.StatusCode <- 404
-            let buffer = Encoding.UTF8.GetBytes("Not Found")
-            response.ContentLength64 <- int64 buffer.Length
-            response.OutputStream.Write(buffer, 0, buffer.Length)
+        Console.WriteLine("{0} {1} -- End: status={2}", request.HttpMethod, request.Url.LocalPath, response.StatusCode)
 
         response.Close()
     }
+
+let processRequest (context: HttpListenerContext) =
+    async {
+        match context.Request.HttpMethod, context.Request.Url.LocalPath with
+        | "POST", "/filter" ->
+            context
+            |> respondWith (fun stream ->
+                async {
+                    let! filterRequest =
+                        stream
+                        |> JsonSerializer.DeserializeAsync<FilterRequest>
+                        |> fun vt -> vt.AsTask()
+                        |> Async.AwaitTask
+
+                    let greenfilter x y pixel = { pixel with G = byte 255 }
+
+                    let imageResult =
+                        filterRequest.imageData
+                        |> Convert.FromBase64String
+                        |> fun data -> new MemoryStream(data)
+                        |> loadImage
+
+                    match imageResult with
+                    | Ok image ->
+                        let htmlResponse =
+                            image.Pixels
+                            |> applyFilter greenfilter
+                            |> pngify image.Height image.Width
+                            |> Convert.ToBase64String
+                            |> (fun img -> render "filter.frag.html" [ ("image", img) ])
+
+                        return Ok(htmlResponse)
+                    | Error error -> return Error(error)
+                })
+        | "POST", "/upload" ->
+            context
+            |> respondWith (fun stream ->
+                async {
+                    match stream |> parseMultipartFormData with
+                    | Some imageStream ->
+                        match imageStream |> loadImage with
+                        | Ok image ->
+                            let htmlResponse =
+                                image.Pixels
+                                |> pngify image.Height image.Width
+                                |> Convert.ToBase64String
+                                |> (fun img -> render "upload.frag.html" [ ("image", img) ])
+
+                            return Ok(htmlResponse)
+                        | Error error -> return Error(error)
+                    | None -> return Error("Failed to parse image")
+                })
+        | "GET", "/" ->
+            context
+            |> respondWith (fun _ ->
+                async {
+                    let htmlResponse = render "index.html" []
+                    return Ok(htmlResponse)
+                })
+        | _ ->
+            async {
+                let response = context.Response
+                response.StatusCode <- 404
+                let buffer = Encoding.UTF8.GetBytes("Not Found")
+                response.ContentLength64 <- int64 buffer.Length
+                response.OutputStream.Write(buffer, 0, buffer.Length)
+                response.Close()
+            }
+        |> Async.StartAsTask
+        |> ignore
+    }
+
 
 let startServer (port: int) =
     let listener = new HttpListener()
