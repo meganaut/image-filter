@@ -97,7 +97,7 @@ let respondWith (handlerFunc: Stream -> Async<Result<string, string>>) (context:
                 response.ContentLength64 <- int64 buffer.Length
                 response.OutputStream.Write(buffer, 0, buffer.Length)
         with ex ->
-            Console.WriteLine("Error: %s", ex.Message)
+            Console.WriteLine("Error: " + ex.Message)
             response.StatusCode <- 500
             let buffer = Encoding.UTF8.GetBytes("Internal Server Error")
             response.ContentLength64 <- int64 buffer.Length
