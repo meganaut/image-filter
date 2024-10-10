@@ -7,6 +7,7 @@ open SixLabors.ImageSharp.Formats
 open System.Text
 open System
 open System.Text.Json
+open HttpMultipartParser
 
 // Models
 type Pixel = { R: byte; G: byte; B: byte; A: byte }
@@ -56,26 +57,13 @@ type FilterRequest = { filter: string; imageData: string }
 
 let parseMultipartFormData (request: HttpListenerRequest) =
     if request.ContentType.StartsWith("multipart/form-data") then
-        let boundary = "--" + request.ContentType.Split('=').[1]
-        use reader = new StreamReader(request.InputStream)
-        let content = reader.ReadToEnd()
-        let sections = content.Split(boundary, StringSplitOptions.RemoveEmptyEntries)
+        let parser = request.InputStream |> MultipartFormDataParser.Parse
 
-        let getFileSection (sections: string array) =
-            sections
-            |> Seq.tryFind (fun section -> section.Contains("Content-Disposition: form-data; name=\"file\""))
-
-        match getFileSection sections with
-        | Some fileSection ->
-            // The file content starts after two newlines (headers + empty line)
-            let headerEndIndex = fileSection.IndexOf("\r\n\r\n") + 4
-            let fileContent = fileSection.Substring(headerEndIndex)
-            let trimmedContent = fileContent.TrimEnd([| '\r'; '\n' |])
-
-            // Convert the remaining binary content to a byte array
-            let fileBytes = Encoding.Default.GetBytes(trimmedContent)
-            Some(fileBytes)
-        | None -> None
+        try
+            Some(parser.Files[0].Data)
+        with ex ->
+            Console.WriteLine("Failed to parse multipart form data: %s", ex.Message)
+            None
     else
         None
 
@@ -140,12 +128,11 @@ let processRequest (context: HttpListenerContext) =
         | "POST", "/upload" ->
             Console.WriteLine("Processing image upload request...")
 
-
             let redfilter x y pixel = { pixel with R = byte 255 }
 
             match parseMultipartFormData request with
-            | Some fileBytes ->
-                let imageResult = new MemoryStream(fileBytes) |> loadImage
+            | Some stream ->
+                let imageResult = stream |> loadImage
 
                 match imageResult with
                 | Ok image ->
@@ -155,14 +142,12 @@ let processRequest (context: HttpListenerContext) =
                         |> pngify image.Height image.Width
                         |> Convert.ToBase64String
                         |> sprintf
-                            """
-                            <h1>Upload an Image</h1>
-                                                                                      
+                            """                                                                                      
                             <img id="uploadedImage"  src="data:image/png;base64,%s" alt="Filtered Image" />
                             
                             <div>
-                                <label for="description">Image Filter:</label>
-                                <input type="text" id="description" name="description" />
+                                <label for="scripto">Image Filter:</label>
+                                <input type="text-area" id="scripto" name="scripto" />
                             </div>
                             
                             <button 
@@ -170,8 +155,8 @@ let processRequest (context: HttpListenerContext) =
                                 hx-trigger="click"
                                 hx-target="#uploadedImage"
                                 hx-vals="{
-                                    filter: document.getElementById('description').value
-                                    imageData: document.getElementById('uploadedImage').src
+                                    'filter': 'document.getElementById('scripto').value'
+                                    'imageData': 'document.getElementById('uploadedImage').src'
                                 }">
                                 Apply Filter
                             </button>
@@ -202,18 +187,14 @@ let processRequest (context: HttpListenerContext) =
                         <script src="https://unpkg.com/htmx.org"></script>
                     </head>
                     <body>
-                        <h1>Upload an Image</h1>
-
                         <form 
-                            action="/upload" 
-                            method="POST" 
-                            class="form" 
+                            id="uploadForm"
+                            method="post" 
                             enctype="multipart/form-data"
-                            hx-post="{{request.path}}"
-                            hx-target="this"
-                            hx-swap="outerHTML" 
-                            hx-encoding="multipart/form-data"
+                            hx-post="/upload"
+                            hx-swap="outerHTML"
                         >
+                            <h1>Upload an Image</h1>
                             <input type="file" name="file" />
                             <input type="submit" value="Upload" />
                         </form>
